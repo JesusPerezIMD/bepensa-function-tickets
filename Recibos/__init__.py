@@ -7,26 +7,30 @@ from azure.ai.formrecognizer import DocumentAnalysisClient
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
 
-    url = req.params.get('url')
-    if not url:
-        try:
-            req_body = req.get_json()
-        except ValueError:
-            pass
-        else:
-            url = req_body.get('url')
+    try:
+        # Leer bytes de la imagen directamente del cuerpo de la solicitud
+        image_bytes = req.get_body()
+        if not image_bytes:
+            return func.HttpResponse(
+                "Please pass the image bytes in the request body",
+                status_code=400
+            )
 
-    if url:
-        result = analizar_ticket(url)
+        # Procesar la imagen y obtener el resultado
+        result = analizar_ticket(image_bytes)
         json_result = json.dumps(result)
+
+        # Imprimir el resultado en la consola para propósitos de depuración
+        logging.info(f'Resultado del análisis de la imagen: {json_result}')
+
         return func.HttpResponse(json_result, mimetype="application/json")
-    else:
+    except ValueError as ve:
         return func.HttpResponse(
-            "Please pass a url on the query string or in the request body",
+            f"Error reading image bytes: {str(ve)}",
             status_code=400
         )
 
-def analizar_ticket(url):
+def analizar_ticket(image_bytes):
     endpoint = "https://citcognitiveservicedev.cognitiveservices.azure.com"
     key = "586bf736a33a4b8b8795ddd9d4aeb2e7"
 
@@ -34,7 +38,7 @@ def analizar_ticket(url):
         endpoint=endpoint, credential=AzureKeyCredential(key)
     )
 
-    poller = document_analysis_client.begin_analyze_document_from_url("prebuilt-receipt", url)
+    poller = document_analysis_client.begin_analyze_document("prebuilt-receipt", image_bytes)
     receipts = poller.result()
 
     tipo_registro_map = {
@@ -46,12 +50,20 @@ def analizar_ticket(url):
     }
 
     output = []
-    for idx, receipt in enumerate(receipts.documents):
-        # Obtener el objeto AddressValue si está disponible.
-        merchant_address_value = receipt.fields.get("MerchantAddress").value if receipt.fields.get("MerchantAddress") else None
-        
-        if merchant_address_value:
-            # Utilizar los campos de AddressValue para construir la dirección.
+    for receipt in receipts.documents:
+        fields = {
+            "MerchantName": receipt.fields.get("MerchantName"),
+            "MerchantAddress": receipt.fields.get("MerchantAddress"),
+            "Total": receipt.fields.get("Total")
+        }
+
+        confident_fields = {
+            key: value for key, value in fields.items() if value and value.confidence >= 0.5
+        }
+
+        merchant_address_line = ""
+        if "MerchantAddress" in confident_fields:
+            merchant_address_value = confident_fields["MerchantAddress"].value
             address_components = [
                 merchant_address_value.house_number,
                 merchant_address_value.road,
@@ -61,32 +73,19 @@ def analizar_ticket(url):
                 merchant_address_value.country_region,
                 merchant_address_value.street_address,
             ]
-            # Filtrar los componentes que son None o vacíos.
             full_address = " ".join(filter(None, address_components))
-            merchant_address_confidence = f"{receipt.fields.get('MerchantAddress').confidence * 100:.1f}%"
-            merchant_address_line = f"{full_address}, Confianza: {merchant_address_confidence}"
-        else:
-            merchant_address_line = None
+            merchant_address_line = full_address
 
-        tipo_registro = tipo_registro_map.get(receipt.doc_type, receipt.doc_type)
-        merchant_name = receipt.fields.get("MerchantName").value if receipt.fields.get("MerchantName") else None
-        merchant_name_confidence = f"{receipt.fields.get('MerchantName').confidence * 100:.1f}%" if merchant_name else None
-        total_value = receipt.fields.get("Total").value if receipt.fields.get("Total") else None
-        total_confidence = f"{receipt.fields.get('Total').confidence * 100:.1f}%" if total_value else None
+        tipo_registro = tipo_registro_map.get(receipt.doc_type, "Otro")
 
         receipt_info = {
             "TipoRegistro": tipo_registro,
-            "NombreComerciante": f"{merchant_name}, Confianza: {merchant_name_confidence}" if merchant_name else None,
+            "NombreComerciante": confident_fields['MerchantName'].value if "MerchantName" in confident_fields else "",
             "LugarComerciante": merchant_address_line,
-            "Importe": f"{total_value}, Confianza: {total_confidence}" if total_value else None,
+            "Importe": confident_fields['Total'].value if "Total" in confident_fields else "",
             "Descripcion": "",
         }
 
-        # Eliminar las claves con valores None antes de añadir al resultado final
-        receipt_info = {k: v for k, v in receipt_info.items() if v is not None}
         output.append(receipt_info)
 
     return output
-
-
-

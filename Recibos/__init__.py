@@ -1,5 +1,6 @@
 import logging
 import azure.functions as func
+import json
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.formrecognizer import DocumentAnalysisClient
 
@@ -17,7 +18,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
     if url:
         result = analizar_ticket(url)
-        return func.HttpResponse(result, mimetype="text/plain")
+        json_result = json.dumps(result)
+        return func.HttpResponse(json_result, mimetype="application/json")
     else:
         return func.HttpResponse(
             "Please pass a url on the query string or in the request body",
@@ -25,7 +27,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 def analizar_ticket(url):
-
     endpoint = "https://citcognitiveservicedev.cognitiveservices.azure.com"
     key = "586bf736a33a4b8b8795ddd9d4aeb2e7"
 
@@ -36,60 +37,56 @@ def analizar_ticket(url):
     poller = document_analysis_client.begin_analyze_document_from_url("prebuilt-receipt", url)
     receipts = poller.result()
 
-    output = ""
+    tipo_registro_map = {
+        "receipt.retailMeal": "Comida",
+        "receipt.creditCard": "Varios",
+        "receipt.gas": "Transporte",
+        "receipt.parking": "Varios",
+        "receipt.hotel": "Hospedaje"
+    }
+
+    output = []
     for idx, receipt in enumerate(receipts.documents):
-        output += "--------Reconociendo Recibo #{}--------\n".format(idx + 1)
-        receipt_type = receipt.doc_type
-        if receipt_type:
-            output += "Tipo de recibo: {}\n".format(receipt_type)
-        merchant_name = receipt.fields.get("MerchantName")
-        if merchant_name:
-            output += "Nombre del comerciante: {} con int. de confianza: {}\n".format(
-                merchant_name.value, merchant_name.confidence
-            )
-        transaction_date = receipt.fields.get("TransactionDate")
-        if transaction_date:
-            output += "Fecha de emisión del recibo: {} con confianza: {}\n".format(
-                transaction_date.value, transaction_date.confidence
-            )
-        if receipt.fields.get("Items"):
-            output += "Artículos:\n"
-            for idx, item in enumerate(receipt.fields.get("Items").value):
-                output += "...Artículo #{}\n".format(idx + 1)
-                item_description = item.value.get("Description")
-                if item_description:
-                    output += "......Descripción: {} con confianza: {}\n".format(
-                        item_description.value, item_description.confidence
-                    )
-                item_quantity = item.value.get("Quantity")
-                if item_quantity:
-                    output += "......Cantidad: {} con confianza: {}\n".format(
-                        item_quantity.value, item_quantity.confidence
-                    )
-                item_price = item.value.get("Price")
-                if item_price:
-                    output += "......Precio individual: ${} con confianza: {}\n".format(
-                        item_price.value, item_price.confidence
-                    )
-                item_total_price = item.value.get("TotalPrice")
-                if item_total_price:
-                    output += "......Precio total: ${} con confianza: {}\n".format(
-                        item_total_price.value, item_total_price.confidence
-                    )
-        subtotal = receipt.fields.get("Subtotal")
-        if subtotal:
-            output += "Subtotal: {} con confianza: {}\n".format(
-                subtotal.value, subtotal.confidence
-            )
-        tax = receipt.fields.get("TotalTax")
-        if tax:
-            output += "Impuestos: ${} con confianza {}\n".format(tax.value, tax.confidence)
-        tip = receipt.fields.get("Tip")
-        if tip:
-            output += "Propina: ${} con confianza: {}\n".format(tip.value, tip.confidence)
-        total = receipt.fields.get("Total")
-        if total:
-            output += "Total: ${} con confianza: {}\n".format(total.value, total.confidence)
-        output += "--------------------------------------\n"
+        # Obtener el objeto AddressValue si está disponible.
+        merchant_address_value = receipt.fields.get("MerchantAddress").value if receipt.fields.get("MerchantAddress") else None
+        
+        if merchant_address_value:
+            # Utilizar los campos de AddressValue para construir la dirección.
+            address_components = [
+                merchant_address_value.house_number,
+                merchant_address_value.road,
+                merchant_address_value.city,
+                merchant_address_value.state,
+                merchant_address_value.postal_code,
+                merchant_address_value.country_region,
+                merchant_address_value.street_address,
+            ]
+            # Filtrar los componentes que son None o vacíos.
+            full_address = " ".join(filter(None, address_components))
+            merchant_address_confidence = f"{receipt.fields.get('MerchantAddress').confidence * 100:.1f}%"
+            merchant_address_line = f"{full_address}, Confianza: {merchant_address_confidence}"
+        else:
+            merchant_address_line = None
+
+        tipo_registro = tipo_registro_map.get(receipt.doc_type, receipt.doc_type)
+        merchant_name = receipt.fields.get("MerchantName").value if receipt.fields.get("MerchantName") else None
+        merchant_name_confidence = f"{receipt.fields.get('MerchantName').confidence * 100:.1f}%" if merchant_name else None
+        total_value = receipt.fields.get("Total").value if receipt.fields.get("Total") else None
+        total_confidence = f"{receipt.fields.get('Total').confidence * 100:.1f}%" if total_value else None
+
+        receipt_info = {
+            "TipoRegistro": tipo_registro,
+            "NombreComerciante": f"{merchant_name}, Confianza: {merchant_name_confidence}" if merchant_name else None,
+            "LugarComerciante": merchant_address_line,
+            "Importe": f"{total_value}, Confianza: {total_confidence}" if total_value else None,
+            "Descripcion": "",
+        }
+
+        # Eliminar las claves con valores None antes de añadir al resultado final
+        receipt_info = {k: v for k, v in receipt_info.items() if v is not None}
+        output.append(receipt_info)
 
     return output
+
+
+

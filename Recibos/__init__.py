@@ -1,6 +1,6 @@
 import logging
-import azure.functions as func
 import json
+import azure.functions as func
 from azure.core.credentials import AzureKeyCredential
 from azure.ai.formrecognizer import DocumentAnalysisClient
 
@@ -8,13 +8,21 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
 
     try:
-        # Leer bytes de la imagen directamente del cuerpo de la solicitud
-        image_bytes = req.get_body()
-        if not image_bytes:
+        # Asegúrate de que la solicitud es una solicitud POST
+        if req.method != 'POST':
             return func.HttpResponse(
-                "Please pass the image bytes in the request body",
+                "This endpoint only supports POST requests.",
+                status_code=405
+            )
+
+        # Leer el archivo de la imagen desde los datos del formulario 'form-data'
+        file = req.files.get('file')
+        if not file:
+            return func.HttpResponse(
+                "Please upload the file with the 'file' key in form-data.",
                 status_code=400
             )
+        image_bytes = file.read()
 
         # Procesar la imagen y obtener el resultado
         result = analizar_ticket(image_bytes)
@@ -26,7 +34,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(json_result, mimetype="application/json")
     except ValueError as ve:
         return func.HttpResponse(
-            f"Error reading image bytes: {str(ve)}",
+            f"Error reading image file: {str(ve)}",
             status_code=400
         )
 
